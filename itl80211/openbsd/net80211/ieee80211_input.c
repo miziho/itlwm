@@ -68,6 +68,17 @@
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
 
+/* Diagnostic trace channel (IORegistry "WDTRACE" property). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+#ifndef WCL_RELEASE
+void WDTraceFmtC(const char *fmt, ...);
+#endif
+#ifdef __cplusplus
+}
+#endif
+
 mbuf_t ieee80211_input_hwdecrypt(struct ieee80211com *,
                                  struct ieee80211_node *, mbuf_t,
                                  struct ieee80211_rxinfo *rxi);
@@ -1122,9 +1133,21 @@ ieee80211_enqueue_data(struct ieee80211com *ic, mbuf_t m,
     }
 #endif
     if (m != NULL) {
-        if ((ic->ic_flags & IEEE80211_F_RSNON) &&
-            eh->ether_type == htons(ETHERTYPE_PAE)) {
+        if (eh->ether_type == htons(ETHERTYPE_PAE))
+            XYLog("WDPAE rx state=%d rsn=0x%x ent=%d port=%d\n",
+                  ic->ic_state, ic->ic_flags & IEEE80211_F_RSNON,
+                  ic->ic_wcl_enterprise, ni->ni_port_valid);
+        if (((ic->ic_flags & IEEE80211_F_RSNON)
+#ifdef AIRPORT_WCL
+             || ic->ic_wcl_enterprise
+#endif
+            ) && eh->ether_type == htons(ETHERTYPE_PAE)) {
             ifp->netStat->inputPackets++;
+            WDTraceFmtC("WDPAE rx state=%d rsn=0x%x ent=%d port=%d akm=0x%x cipher=%d len=%u",
+                       ic->ic_state, ic->ic_flags & IEEE80211_F_RSNON,
+                       ic->ic_wcl_enterprise, ni->ni_port_valid,
+                       (unsigned)ni->ni_rsnakms, ni->ni_rsncipher,
+                       (unsigned)mbuf_pkthdr_len(m));
 #if NBPFILTER > 0
             /*
              * If we forward frame into transmitter of the AP,
@@ -2702,6 +2725,13 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
                           struct ieee80211_node *ni, int reassoc)
 {
     XYLog("%s reassoc=%d\n", __FUNCTION__, reassoc);
+    XYLog("WEASSOC resp reassoc=%d state=%d handler=%p\n",
+          reassoc, ic->ic_state, (void *)ic->ic_event_handler);
+    WDTraceFmtC("WEASSOC reassoc=%d state=%d ent=%d rsn=0x%x akm=0x%x cipher=%d",
+               reassoc, ic->ic_state, ic->ic_wcl_enterprise,
+               ic->ic_flags & IEEE80211_F_RSNON,
+               (unsigned)(ic->ic_bss ? ic->ic_bss->ni_rsnakms : 0),
+               ic->ic_bss ? ic->ic_bss->ni_rsncipher : 0);
     struct _ifnet *ifp = &ic->ic_if;
     const struct ieee80211_frame *wh;
     const u_int8_t *frm, *efrm;

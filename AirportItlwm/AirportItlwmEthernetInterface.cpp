@@ -18,6 +18,13 @@ extern IOCommandGate *_fCommandGate;
 #define super IOEthernetInterface
 OSDefineMetaClassAndStructors(AirportItlwmEthernetInterface, IOEthernetInterface);
 
+/* Diagnostic trace channel (IORegistry "WDTRACE" property). */
+#ifdef WCL_RELEASE
+#define WDSetTrace(tag) do { } while (0)
+#else
+extern "C" void WDSetTrace(const char *tag);
+#endif
+
 bool AirportItlwmEthernetInterface::
 initWithSkywalkInterfaceAndProvider(IONetworkController *controller, IO80211SkywalkInterface *interface)
 {
@@ -52,6 +59,7 @@ attachToDataLinkLayer( IOOptionBits options, void *parameter )
     }
 #endif
     IOReturn ret = super::attachToDataLinkLayer(options, parameter);
+    WDSetTrace("WDBSD_ATTACH");
     if (ret == kIOReturnSuccess && interface) {
         UInt8 builtIn = 0;
         IOEthernetAddress addr;
@@ -89,6 +97,7 @@ attachToDataLinkLayer( IOOptionBits options, void *parameter )
 void AirportItlwmEthernetInterface::
 detachFromDataLinkLayer(IOOptionBits options, void *parameter)
 {
+    WDSetTrace("WDBSD_DETACH");
     super::detachFromDataLinkLayer(options, parameter);
     isAttach = false;
 }

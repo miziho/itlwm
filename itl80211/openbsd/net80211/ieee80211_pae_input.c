@@ -54,6 +54,17 @@
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
 
+/* Diagnostic trace channel (IORegistry "WDTRACE" property). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+#ifndef WCL_RELEASE
+void WDTraceFmtC(const char *fmt, ...);
+#endif
+#ifdef __cplusplus
+}
+#endif
+
 void	ieee80211_recv_4way_msg1(struct ieee80211com *,
                                  struct ieee80211_eapol_key *, struct ieee80211_node *);
 #ifndef IEEE80211_STA_ONLY
@@ -91,6 +102,11 @@ ieee80211_eapol_key_input(struct ieee80211com *ic, mbuf_t m,
                           struct ieee80211_node *ni)
 {
     XYLog("%s\n", __FUNCTION__);
+    // Every EAP and EAPOL-Key frame arrives here; log them all so the
+    // user-space/driver split of the enterprise handshake is visible.
+    WDTraceFmtC("WEAP in state=%d ent=%d len=%u",
+                ic->ic_state, ic->ic_wcl_enterprise,
+                (unsigned)mbuf_pkthdr_len(m));
     struct _ifnet *ifp = &ic->ic_if;
     struct ether_header *eh;
     struct ieee80211_eapol_key *key;
@@ -137,6 +153,14 @@ ieee80211_eapol_key_input(struct ieee80211com *ic, mbuf_t m,
         goto done;
     
     info = BE_READ_2(key->info);
+    XYLog("WDEK info=0x%x type=%u desc=%u bodylen=%d paylen=%d proto=%d akm=0x%x cipher=%d group=%d state=%d rsnstate=%d port=%d\n",
+          info, key->type, key->desc, bodylen, paylen, ni->ni_rsnprotos,
+          (unsigned)ni->ni_rsnakms, ni->ni_rsncipher, ni->ni_rsngroupcipher,
+          ic->ic_state, ni->ni_rsn_supp_state, ni->ni_port_valid);
+    WDTraceFmtC("WDEK info=0x%x type=%u desc=%u paylen=%d akm=0x%x cipher=%d group=%d state=%d rsnstate=%d port=%d ent=%d",
+               info, key->type, key->desc, paylen, (unsigned)ni->ni_rsnakms,
+               ni->ni_rsncipher, ni->ni_rsngroupcipher, ic->ic_state,
+               ni->ni_rsn_supp_state, ni->ni_port_valid, ic->ic_wcl_enterprise);
     
     /* discard EAPOL-Key frames with an unknown descriptor version */
     desc = info & EAPOL_KEY_VERSION_MASK;
@@ -203,6 +227,14 @@ ieee80211_recv_4way_msg1(struct ieee80211com *ic,
                          struct ieee80211_eapol_key *key, struct ieee80211_node *ni)
 {
     XYLog("%s\n", __FUNCTION__);
+    XYLog("WDM1 enter state=%d replay_ok=%d akm=0x%x proto=%d cipher=%d group=%d\n",
+          ni->ni_rsn_supp_state, ni->ni_replaycnt_ok,
+          (unsigned)ni->ni_rsnakms, ni->ni_rsnprotos,
+          ni->ni_rsncipher, ni->ni_rsngroupcipher);
+    WDTraceFmtC("WDM1 state=%d replay=%d akm=0x%x proto=%d cipher=%d group=%d ent=%d",
+               ni->ni_rsn_supp_state, ni->ni_replaycnt_ok,
+               (unsigned)ni->ni_rsnakms, ni->ni_rsnprotos,
+               ni->ni_rsncipher, ni->ni_rsngroupcipher, ic->ic_wcl_enterprise);
     struct ieee80211_ptk tptk;
     struct ieee80211_pmk *pmk;
     const u_int8_t *frm, *efrm;
@@ -260,6 +292,12 @@ ieee80211_recv_4way_msg1(struct ieee80211com *ic,
         pmk = ieee80211_pmksa_find(ic, ni,
                                    (pmkid != NULL) ? &pmkid[6] : NULL);
         if (pmk == NULL) {
+            XYLog("WDM1 no PMK akm=0x%x pmkid=%d\n",
+                  (unsigned)ni->ni_rsnakms, pmkid != NULL);
+            WDTraceFmtC("WDM1 no PMK akm=0x%x pmkid=%d ent=%d state=%d port=%d",
+                       (unsigned)ni->ni_rsnakms, pmkid != NULL,
+                       ic->ic_wcl_enterprise, ni->ni_rsn_supp_state,
+                       ni->ni_port_valid);
             DPRINTF(("no PMK available for %s\n",
                      ether_sprintf(ni->ni_macaddr)));
             return;
@@ -301,6 +339,9 @@ ieee80211_recv_4way_msg2(struct ieee80211com *ic,
                          const u_int8_t *rsnie)
 {
     XYLog("%s\n", __FUNCTION__);
+    WDTraceFmtC("WDM2 state=%d rsnstate=%d akm=0x%x ent=%d",
+               ic->ic_state, ni->ni_rsn_supp_state, (unsigned)ni->ni_rsnakms,
+               ic->ic_wcl_enterprise);
     struct ieee80211_ptk tptk;
     
     if (ic->ic_opmode != IEEE80211_M_HOSTAP &&
@@ -379,6 +420,11 @@ void
 ieee80211_recv_4way_msg3(struct ieee80211com *ic,
                          struct ieee80211_eapol_key *key, struct ieee80211_node *ni)
 {
+    XYLog("WDM3 enter state=%d rsnstate=%d akm=0x%x\n",
+          ic->ic_state, ni->ni_rsn_supp_state, (unsigned)ni->ni_rsnakms);
+    WDTraceFmtC("WDM3 state=%d rsnstate=%d akm=0x%x ent=%d port=%d",
+               ic->ic_state, ni->ni_rsn_supp_state, (unsigned)ni->ni_rsnakms,
+               ic->ic_wcl_enterprise, ni->ni_port_valid);
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211_ptk tptk;
     struct ieee80211_key *k;
@@ -713,6 +759,9 @@ ieee80211_recv_4way_msg4(struct ieee80211com *ic,
                          struct ieee80211_eapol_key *key, struct ieee80211_node *ni)
 {
     XYLog("%s\n", __FUNCTION__);
+    WDTraceFmtC("WDM4 state=%d rsnstate=%d akm=0x%x ent=%d",
+               ic->ic_state, ni->ni_rsn_supp_state, (unsigned)ni->ni_rsnakms,
+               ic->ic_wcl_enterprise);
     if (ic->ic_opmode != IEEE80211_M_HOSTAP &&
         ic->ic_opmode != IEEE80211_M_IBSS)
         return;

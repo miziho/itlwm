@@ -7,6 +7,10 @@
 //
 
 #include "AirportItlwm.hpp"
+#ifdef AIRPORT_WCL
+#include "AirportItlwmSkywalkInterface.hpp"
+#include "AirportItlwmV2.hpp"
+#endif
 #include <sys/_netstat.h>
 
 extern IOCommandGate *_fCommandGate;
@@ -647,12 +651,55 @@ getBSSID(OSObject *object,
                          struct apple80211_bssid_data *bd)
 {
     struct ieee80211com *ic = fHalService->get80211Controller();
+    XYLog("WDBSSID get(legacy) state=%d flags=0x%x wcljoin=%d des=%s\n",
+          ic->ic_state, ic->ic_flags, ic->ic_wcl_join_requested,
+          ether_sprintf(ic->ic_des_bssid));
+    WDTraceFmtC("WDBSSID legacy state=%d flags=0x%x joinreq=%d des=%s",
+                ic->ic_state, ic->ic_flags, ic->ic_wcl_join_requested,
+                ether_sprintf(ic->ic_des_bssid));
     if (ic->ic_state == IEEE80211_S_RUN) {
         memset(bd, 0, sizeof(*bd));
         bd->version = APPLE80211_VERSION;
         memcpy(bd->bssid.octet, ic->ic_bss->ni_bssid, APPLE80211_ADDR_LEN);
         return kIOReturnSuccess;
     }
+    const uint8_t *target = NULL;
+    if (ic->ic_flags & IEEE80211_F_DESBSSID)
+        target = ic->ic_des_bssid;
+    else if (ic->ic_wcl_join_requested && ic->ic_bss)
+        target = ic->ic_bss->ni_bssid;
+#ifdef AIRPORT_WCL
+    if (!target) {
+        // The join request names the BSSID of the network. When the join is
+        // deferred (a private MAC change restarts the firmware) the desired
+        // BSSID is not in the 802.11 stack yet, but the supplicant asks for
+        // it before the association is through: without it the EAP responses
+        // cannot be addressed and the session never starts.
+        auto skywalk = static_cast<AirportItlwmSkywalkInterface *>(fNetIf);
+        const uint8_t *wanted = skywalk ? skywalk->getJoinBSSID() : nullptr;
+        if (wanted) {
+            bool nonzero = false;
+            for (unsigned i = 0; i < APPLE80211_ADDR_LEN; ++i)
+                nonzero |= wanted[i] != 0;
+            if (nonzero)
+                target = wanted;
+        }
+    }
+#endif
+    if (target) {
+        bool nonzero = false;
+        for (unsigned i = 0; i < APPLE80211_ADDR_LEN; ++i)
+            nonzero |= target[i] != 0;
+        if (nonzero) {
+            memset(bd, 0, sizeof(*bd));
+            bd->version = APPLE80211_VERSION;
+            memcpy(bd->bssid.octet, target, APPLE80211_ADDR_LEN);
+            XYLog("WDBSSID get(legacy) early success %s\n",
+                  ether_sprintf(bd->bssid.octet));
+            return kIOReturnSuccess;
+        }
+    }
+    XYLog("WDBSSID get(legacy) fail 6\n");
     return 6;
 }
 
@@ -1001,7 +1048,7 @@ setPOWER(OSObject *object,
 {
     if (!pd)
         return kIOReturnError;
-    IOLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
+    XYLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
     if (pd->num_radios > 0) {
         bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
         if (pd->power_state[0] == 0) {

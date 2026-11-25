@@ -9,6 +9,7 @@
 #include "AirportItlwmV2.hpp"
 #include <sys/_netstat.h>
 #include <crypto/sha1.h>
+#include <kern/clock.h>
 #include <net80211/ieee80211_priv.h>
 #include <net80211/ieee80211_var.h>
 
@@ -21,6 +22,159 @@ OSDefineMetaClassAndStructors(CTimeout, OSObject)
 
 IO80211WorkQueue *_fWorkloop;
 IOCommandGate *_fCommandGate;
+static AirportItlwm *gAirportItlwmController = NULL;
+static char gWDTrace[16384] = { 0 };
+static size_t gWDTraceLen = 0;
+
+#ifndef WCL_RELEASE
+extern "C" void WDSetTrace(const char *tag)
+{
+    if (!tag)
+        return;
+
+    // Prefix every entry with the uptime stamp. The kext unified log is not
+    // visible on this system, so the trace buffer is the only way to correlate
+    // driver events with the framework log. clock_get_uptime() is used because
+    // it is already referenced by the net80211 sources, so the bundle does not
+    // gain a new kernel symbol dependency; the reader converts the uptime into
+    // wall clock time.
+    char line[1024];
+    uint64_t uptime = 0;
+    clock_get_uptime(&uptime);
+    snprintf(line, sizeof(line), "[%llu.%03llu] %s",
+             (unsigned long long)(uptime / 1000000000ULL),
+             (unsigned long long)((uptime / 1000000ULL) % 1000ULL), tag);
+
+    size_t tagLen = strlen(line);
+    if (tagLen > sizeof(gWDTrace) - 2)
+        tagLen = sizeof(gWDTrace) - 2;
+    size_t need = tagLen + 1;
+    if (gWDTraceLen + need >= sizeof(gWDTrace)) {
+        size_t drop = gWDTraceLen + need - (sizeof(gWDTrace) - 1);
+        if (drop >= gWDTraceLen) {
+            gWDTraceLen = 0;
+            gWDTrace[0] = 0;
+        } else {
+            memmove(gWDTrace, gWDTrace + drop, gWDTraceLen - drop);
+            gWDTraceLen -= drop;
+        }
+    }
+    memcpy(gWDTrace + gWDTraceLen, line, tagLen);
+    gWDTrace[gWDTraceLen + tagLen] = '\n';
+    gWDTraceLen += need;
+    gWDTrace[gWDTraceLen] = 0;
+    if (gAirportItlwmController) {
+        OSString *value = OSString::withCString(gWDTrace);
+        if (value) {
+            gAirportItlwmController->setProperty("WDTRACE", value);
+            value->release();
+        }
+    }
+}
+#endif
+
+// Formatted variant of the trace writer.
+//
+// Kexts may only reference symbols exported by the kernel; libc functions such
+// as vsnprintf are not available and make the bundle fail to load. The
+// formatter below therefore walks the format string itself and only relies on
+// compiler builtins (va_start/va_arg) plus snprintf, which the kernel does
+// export.
+//
+// The symbol deliberately carries C linkage: the net80211 sources are compiled
+// as C++ in some targets, and C linkage keeps one single symbol regardless of
+// the language of the calling translation unit.
+#ifndef WCL_RELEASE
+extern "C" void WDTraceFmtC(const char *fmt, ...)
+{
+    if (!fmt)
+        return;
+    char out[768];
+    size_t o = 0;
+    va_list ap;
+    va_start(ap, fmt);
+
+    for (const char *p = fmt; *p && o + 1 < sizeof(out); ) {
+        if (*p != '%') {
+            out[o++] = *p++;
+            continue;
+        }
+        p++;
+        if (*p == '%') {
+            out[o++] = '%';
+            p++;
+            continue;
+        }
+        bool zero = false;
+        while (*p == '0' || *p == '-' || *p == '+' || *p == ' ') {
+            zero = (zero || *p == '0');
+            p++;
+        }
+        int width = 0;
+        while (*p >= '0' && *p <= '9') {
+            width = width * 10 + (*p - '0');
+            p++;
+        }
+        bool lmod = false;
+        while (*p == 'l' || *p == 'h' || *p == 'z' || *p == 'j' || *p == 't') {
+            lmod = (lmod || *p == 'l');
+            p++;
+        }
+        char conv = *p ? *p++ : 0;
+        char tmp[512];
+        int n = 0;
+
+        switch (conv) {
+        case 'd':
+        case 'i': {
+            long v = lmod ? va_arg(ap, long) : (long)va_arg(ap, int);
+            n = snprintf(tmp, sizeof(tmp), zero ? "%0*ld" : "%*ld", width, v);
+            break;
+        }
+        case 'u': {
+            unsigned long v = lmod ? va_arg(ap, unsigned long)
+                                   : (unsigned long)va_arg(ap, unsigned int);
+            n = snprintf(tmp, sizeof(tmp), zero ? "%0*lu" : "%*lu", width, v);
+            break;
+        }
+        case 'x':
+        case 'X': {
+            unsigned long v = lmod ? va_arg(ap, unsigned long)
+                                   : (unsigned long)va_arg(ap, unsigned int);
+            n = snprintf(tmp, sizeof(tmp), zero ? "%0*lx" : "%*lx", width, v);
+            break;
+        }
+        case 'p': {
+            void *v = va_arg(ap, void *);
+            n = snprintf(tmp, sizeof(tmp), "%p", v);
+            break;
+        }
+        case 's': {
+            const char *v = va_arg(ap, const char *);
+            n = snprintf(tmp, sizeof(tmp), "%s", v ? v : "(null)");
+            break;
+        }
+        case 'c': {
+            int v = va_arg(ap, int);
+            n = snprintf(tmp, sizeof(tmp), "%c", v);
+            break;
+        }
+        default:
+            continue;
+        }
+
+        if (n <= 0)
+            continue;
+        size_t len = (size_t)n < sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1;
+        for (size_t i = 0; i < len && o + 1 < sizeof(out); i++)
+            out[o++] = tmp[i];
+    }
+
+    va_end(ap);
+    out[o] = 0;
+    WDSetTrace(out);
+}
+#endif
 
 void AirportItlwm::releaseAll()
 {
@@ -87,10 +241,14 @@ void AirportItlwm::
 eventHandler(struct ieee80211com *ic, int msgCode, void *data)
 {
     AirportItlwm *that = OSDynamicCast(AirportItlwm, ic->ic_ac.ac_if.controller);
+    XYLog("WEVH code=%d cast=%p controller=%p global=%p\n", msgCode, that,
+          ic->ic_ac.ac_if.controller, gAirportItlwmController);
 #ifdef AIRPORT_WCL
     if (!that)
-        return;
+        that = gAirportItlwmController;
 #endif
+    if (!that)
+        return;
     IO80211SkywalkInterface *interface = that->fNetIf;
     if (!interface)
         return;
@@ -265,6 +423,8 @@ initCCLogs()
 
 bool AirportItlwm::start(IOService *provider)
 {
+    XYLog("WDSTART enter\n");
+    WDSetTrace("WDSTART_ENTER");
 #if __IO80211_TARGET == __MAC_15_2
     if (version_major != 24 || version_minor < 2)
         return false;
@@ -278,11 +438,13 @@ bool AirportItlwm::start(IOService *provider)
     setProperty("DriverKitDriver", kOSBooleanFalse);
 #ifdef AIRPORT_WCL
     if (!initCCLogs()) {
+        XYLog("WDSTART fail initCCLogs\n");
         releaseAll();
         return false;
     }
 #endif
     if (!super::start(provider)) {
+        XYLog("WDSTART fail super::start\n");
 #ifdef AIRPORT_WCL
         releaseAll();
 #endif
@@ -324,6 +486,10 @@ bool AirportItlwm::start(IOService *provider)
     }
     fHalService->initWithController(this, _fWorkloop, _fCommandGate);
     fHalService->get80211Controller()->ic_event_handler = eventHandler;
+    gAirportItlwmController = this;
+    XYLog("WDSTART register eventHandler=%p controller=%p\n",
+          (void *)eventHandler, this);
+    WDSetTrace("WDSTART_REGISTER_HANDLER");
 
     if (PE_parse_boot_argn("-novht", &boot_value, sizeof(boot_value)))
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOVHT;
@@ -471,6 +637,7 @@ bool AirportItlwm::start(IOService *provider)
 void AirportItlwm::stop(IOService *provider)
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);XYLog("%s\n", __PRETTY_FUNCTION__);
+    WDSetTrace("WDSTOP");
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
 #ifdef AIRPORT_WCL
     if (fNetIf)
@@ -743,6 +910,13 @@ extern const char* hexdump(uint8_t *buf, size_t len);
 #ifdef AIRPORT_WCL
 UInt32 AirportItlwm::outputPacket(mbuf_t m, void *param)
 {
+    if (m && mbuf_type(m) != MBUF_TYPE_FREE && mbuf_len(m) >= sizeof(ether_header_t)) {
+        ether_header_t *eh = (ether_header_t *)mbuf_data(m);
+        if (eh->ether_type == htons(ETHERTYPE_PAE))
+            XYLog("WDPAE tx len=%zu state=%d\n", (size_t)mbuf_len(m),
+                  fHalService->get80211Controller()->ic_state);
+            WDSetTrace("WDPAE_TX");
+    }
     IOReturn status = _fCommandGate ? _fCommandGate->runAction(outputPacketGated, m) : kIOReturnNotReady;
     if (status != kIOReturnOutputSuccess && status != kIOReturnOutputDropped) {
         if (m && mbuf_type(m) != MBUF_TYPE_FREE)
@@ -766,6 +940,9 @@ UInt32 AirportItlwm::enqueuePacket(mbuf_t m)
 {
     auto ic = fHalService->get80211Controller();
     auto ifp = &ic->ic_ac.ac_if;
+    // Sending traffic counts as activity for the sleep on inactivity timer.
+    if (fNetIf)
+        static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->noteWCLSOIActivity();
     if (ic->ic_state == IEEE80211_S_RUN && ifp->if_snd.queue &&
         m && mbuf_type(m) != MBUF_TYPE_FREE && (mbuf_flags(m) & MBUF_PKTHDR) &&
         ifp->if_snd.queue->lockEnqueue(m))
@@ -873,6 +1050,10 @@ IOReturn AirportItlwm::setHardwareAddress(const void *addrP, UInt32 addrBytes)
 #ifdef AIRPORT_WCL
     if (ic->ic_if.if_flags & IFF_RUNNING) {
         ic->ic_wcl_mac_reconfig = true;
+        // The address change restarts the firmware and drops the association.
+        // Keep the join so it can be repeated when the driver is ready again.
+        if (fNetIf)
+            static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->stashJoinForRejoin();
 #else
     if (fHalService->get80211Controller()->ic_state > IEEE80211_S_INIT) {
 #endif
@@ -1125,7 +1306,7 @@ setPOWER(OSObject *object,
 #ifdef AIRPORT_WCL
     if (!pd)
         return kIOReturnError;
-    IOLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
+    XYLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
     if (pd->num_radios > 0) {
         bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & IFF_RUNNING) != 0;
         if (pd->power_state[0] == 0) {
@@ -1147,7 +1328,7 @@ setPOWER(OSObject *object,
 #else
     if (!pd)
         return kIOReturnError;
-    IOLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
+    XYLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
     if (pd->num_radios > 0) {
         bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
         if (pd->power_state[0] == 0) {
@@ -1168,10 +1349,35 @@ setPOWER(OSObject *object,
 #endif
 }
 
+SInt32 AirportItlwm::handleCardSpecific(IO80211SkywalkInterface *interface,
+                                        unsigned long command, void *data, bool isSet)
+{
+    if (!ml_at_interrupt_context())
+        XYLog("WDCS cmd=%s(%lu) set=%d interface=%p data=%p\n",
+              convertApple80211IOCTLToString((signed int)command),
+              (unsigned long)command, isSet, interface, data);
+    auto sw = OSDynamicCast(AirportItlwmSkywalkInterface, interface);
+    if (sw && data) {
+        if (command == APPLE80211_IOC_BSSID) {
+            IOReturn ret = sw->getBSSID(static_cast<apple80211_bssid_data *>(data));
+            XYLog("WDCS getBSSID ret=%d\n", ret);
+            return (SInt32)ret;
+        }
+        if (command == APPLE80211_IOC_CIPHER_KEY) {
+            IOReturn ret = sw->setCIPHER_KEY(static_cast<apple80211_key *>(data));
+            XYLog("WDCS setCIPHER_KEY ret=%d\n", ret);
+            return (SInt32)ret;
+        }
+    }
+    return 0;
+}
+
 SInt32 AirportItlwm::apple80211_ioctl(IO80211SkywalkInterface *interface,unsigned long cmd,void *data, bool b1, bool b2)
 {
     if (!ml_at_interrupt_context())
-        XYLog("%s cmd: %s b1: %d b2: %d\n", __FUNCTION__, convertApple80211IOCTLToString((unsigned int)cmd), b1, b2);
+        XYLog("WDCTL ioctl cmd=%s(%u) b1=%d b2=%d data=%p\n",
+              convertApple80211IOCTLToString((unsigned int)cmd), (unsigned)cmd,
+              b1, b2, data);
 #ifdef AIRPORT_WCL
     return kIOReturnUnsupported;
 #else
@@ -1182,15 +1388,30 @@ SInt32 AirportItlwm::apple80211_ioctl(IO80211SkywalkInterface *interface,unsigne
 SInt32 AirportItlwm::apple80211SkywalkRequest(UInt request,int cmd,IO80211SkywalkInterface *interface,void *data)
 {
     if (!ml_at_interrupt_context())
-        XYLog("%s 1 cmd: %s request: %d\n", __FUNCTION__, convertApple80211IOCTLToString(cmd), request);
+        XYLog("WDCTL request1 request=%u cmd=%s(%d) data=%p\n",
+              (unsigned)request, convertApple80211IOCTLToString(cmd), cmd, data);
+    auto sw = OSDynamicCast(AirportItlwmSkywalkInterface, interface);
+    if (sw && data) {
+        if (cmd == APPLE80211_IOC_BSSID) {
+            IOReturn ret = sw->getBSSID(static_cast<apple80211_bssid_data *>(data));
+            XYLog("WDCTL request1 getBSSID ret=%d\n", ret);
+            return (SInt32)ret;
+        }
+        if (cmd == APPLE80211_IOC_CIPHER_KEY) {
+            IOReturn ret = sw->setCIPHER_KEY(static_cast<apple80211_key *>(data));
+            XYLog("WDCTL request1 setCIPHER_KEY ret=%d\n", ret);
+            return (SInt32)ret;
+        }
+    }
     return kIOReturnUnsupported;
 }
 
-SInt32 AirportItlwm::apple80211SkywalkRequest(UInt request,int cmd,IO80211SkywalkInterface *interface,void *data,void *)
+SInt32 AirportItlwm::apple80211SkywalkRequest(UInt request,int cmd,IO80211SkywalkInterface *interface,void *data,void *unused)
 {
     if (!ml_at_interrupt_context())
-        XYLog("%s 2 cmd: %s request: %d\n", __FUNCTION__, convertApple80211IOCTLToString(cmd), request);
-    return kIOReturnUnsupported;
+        XYLog("WDCTL request2 request=%u cmd=%s(%d) data=%p unused=%p\n",
+              (unsigned)request, convertApple80211IOCTLToString(cmd), cmd, data, unused);
+    return apple80211SkywalkRequest(request, cmd, interface, data);
 }
 
 IOReturn AirportItlwm::enableAdapter(IONetworkInterface *netif)

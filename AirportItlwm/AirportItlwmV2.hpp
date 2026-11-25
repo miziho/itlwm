@@ -49,7 +49,21 @@ enum
 
 extern "C" {
 const char *convertApple80211IOCTLToString(signed int cmd);
+#ifndef WCL_RELEASE
+void WDSetTrace(const char *tag);
+void WDTraceFmtC(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#endif
 }
+
+// Driver diagnostics.
+//
+// The release build defines WCL_RELEASE and removes every diagnostic call
+// site completely, so a published kext neither logs nor evaluates the
+// arguments of a trace. The development build keeps the full trace.
+#ifdef WCL_RELEASE
+#define WDSetTrace(tag) do { } while (0)
+#define WDTraceFmtC(...) do { } while (0)
+#endif
 
 class AirportItlwm : public IO80211Controller {
     OSDeclareDefaultStructors(AirportItlwm)
@@ -166,10 +180,7 @@ public:
 //            XYLog("%s %s\n", __FUNCTION__, convertApple80211IOCTLToString(command));
         return false;
     };
-    virtual SInt32 handleCardSpecific(IO80211SkywalkInterface *,unsigned long,void *,bool) override {
-        XYLog("%s\n", __FUNCTION__);
-        return 0;
-    };
+    virtual SInt32 handleCardSpecific(IO80211SkywalkInterface *,unsigned long,void *,bool) override;
     virtual IOReturn getDRIVER_VERSION(IO80211SkywalkInterface *interface,apple80211_version_data *data) override {
         XYLog("%s\n", __FUNCTION__);
         return getDRIVER_VERSION((OSObject *)interface, data);

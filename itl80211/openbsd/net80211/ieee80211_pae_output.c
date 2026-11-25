@@ -56,6 +56,17 @@
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
 
+/* Diagnostic trace channel (IORegistry "WDTRACE" property). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+#ifndef WCL_RELEASE
+void WDTraceFmtC(const char *fmt, ...);
+#endif
+#ifdef __cplusplus
+}
+#endif
+
 int		ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
                                  struct ieee80211_node *ni, const struct ieee80211_ptk *ptk);
 #ifndef IEEE80211_STA_ONLY
@@ -76,6 +87,9 @@ ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
                          struct ieee80211_node *ni, const struct ieee80211_ptk *ptk)
 {
     XYLog("%s\n", __FUNCTION__);
+    WDTraceFmtC("WDTX eapol state=%d akm=0x%x ent=%d len=%u",
+               ic->ic_state, (unsigned)ni->ni_rsnakms, ic->ic_wcl_enterprise,
+               (unsigned)mbuf_len(m));
     struct _ifnet *ifp = &ic->ic_if;
     struct ether_header *eh;
     struct ieee80211_eapol_key *key;
@@ -335,6 +349,9 @@ int
 ieee80211_send_4way_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
                          const u_int8_t *replaycnt, const struct ieee80211_ptk *tptk)
 {
+    XYLog("WDM2SEND enter state=%d akm=0x%x cipher=%d group=%d\n",
+          ic->ic_state, (unsigned)ni->ni_rsnakms,
+          ni->ni_rsncipher, ni->ni_rsngroupcipher);
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211_eapol_key *key;
     mbuf_t m;

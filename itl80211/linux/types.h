@@ -110,11 +110,23 @@
 
 #define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
 
+// Driver diagnostics.
+//
+// The release build defines WCL_RELEASE and turns every diagnostic channel
+// into a no-op, so a published kext produces no log output at all. The call
+// sites stay in the source, which keeps the development build and the
+// release build from drifting apart.
+#ifdef WCL_RELEASE
+#define XYLog(fmt, x...) do { } while (0)
+#define WDSetTrace(tag) do { } while (0)
+#define WDTraceFmtC(...) do { } while (0)
+#else
 #define XYLog(fmt, x...)\
 do\
 {\
 kprintf("%s: " fmt, "itlwm", ##x);\
 }while(0)
+#endif
 
 typedef UInt8  u8;
 typedef UInt16 u16;

@@ -1437,6 +1437,10 @@ ieee80211_newstate(struct ieee80211com *ic, enum ieee80211_state nstate,
 #endif
 
 	ostate = ic->ic_state;
+	XYLog("WDSTATE %s -> %s (%d -> %d) mgt=%d rsn=0x%x ent=%d\n",
+	      ieee80211_state_name[ostate], ieee80211_state_name[nstate],
+	      ostate, nstate, mgt, ic->ic_flags & IEEE80211_F_RSNON,
+	      ic->ic_wcl_enterprise);
 	if (ifp->if_flags & IFF_DEBUG)
 		XYLog("%s: %s -> %s\n", ifp->if_xname,
 		    ieee80211_state_name[ostate], ieee80211_state_name[nstate]);
